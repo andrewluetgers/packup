@@ -1,6 +1,6 @@
 # packup
 
-A command-line tool for packing multiple text files into a single file and unpacking them later while preserving directory structure. Respects `.gitignore` rules and provides intelligent text file detection.
+A command-line tool for packing multiple text files into a single file and unpacking them later while preserving directory structure. Particularly useful for sharing codebases with Large Language Models (LLMs) while managing context windows and respecting `.gitignore` rules.
 
 ## Features
 
@@ -12,6 +12,54 @@ A command-line tool for packing multiple text files into a single file and unpac
 - Token counting for LLM context management
 - Visual directory tree output
 - Color-coded status indicators
+
+## LLM Usage
+
+This tool is specifically designed to help when sharing codebases with LLMs:
+
+- Automatically counts tokens (estimated at 4 chars per token)
+- Skips files that would exceed typical LLM context windows (default 10k tokens)
+- Preserves file structure information in a format LLMs can understand
+- Excludes binary files and other content that wouldn't be useful to LLMs
+- Creates a single, well-formatted file you can easily paste into LLM chats
+
+### Using with LLMs
+
+1. Pack your project:
+```bash
+packup pack ./my-project
+```
+
+2. Copy the contents of the generated `packed_files.txt`
+
+3. Paste into your LLM chat with a prompt like:
+```
+I'm going to share my codebase with you. The files will be in this format:
+BEGIN_FILE;./path/to/file
+[file contents]
+END_FILE
+
+Please analyze these files:
+[paste packed_files.txt content here]
+```
+
+### Recreating Files from LLM Output
+
+If an LLM generates multiple files for you, you can ask it to format them using the packup format. Here's a prompt you can use:
+
+```
+Please provide the files in a concatenated format with BEGIN_FILE and END_FILE markers, using this structure:
+BEGIN_FILE;./filepath
+[content]
+END_FILE
+
+This format lets me automatically unpack the files using the packup tool.
+```
+
+Then save the LLM's response to a file and unpack it:
+```bash
+packup unpack llm_response.txt ./new-project
+```
 
 ## Installation
 
