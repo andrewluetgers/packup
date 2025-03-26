@@ -1,0 +1,336 @@
+#!/bin/bash
+
+# packup - pack and unpack text files while respecting gitignore
+
+# ANSI formatting
+BOLD='\033[1m'
+DIM='\033[2m'
+ITALIC='\033[3m'
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+GRAY='\033[0;90m'
+YELLOW='\033[0;33m'
+NC='\033[0m'
+
+# Unicode characters
+CHECK_MARK="✓"
+CROSS_MARK="✗"
+TREE_VERT="│"
+TREE_BRANCH="├──"
+TREE_LAST="└──"
+
+# Configuration
+MAX_CHARS=$((10000 * 4))  # 10,000 tokens * 4 chars per token
+verbose=false
+
+# Array to store ignore patterns
+declare -a ignore_patterns
+
+# Print brief usage (for errors)
+usage() {
+    echo "Usage:"
+    echo "  packup <command> [options]"
+    echo
+    echo "Commands:"
+    echo "  pack    Pack files into a single file"
+    echo "  unpack  Unpack files from a packed file"
+    echo "  help    Show detailed help"
+    echo
+    echo "Run 'packup help' or 'packup -h' for detailed information"
+    exit 1
+}
+
+# Print detailed help
+show_help() {
+    local command="$1"
+    
+    echo -e "${BOLD}packup${NC} - Pack and unpack text files while respecting gitignore"
+    echo
+    
+    case "$command" in
+        pack|"")
+            echo -e "${BOLD}PACK COMMAND${NC}"
+            echo -e "${DIM}Pack text files into a single file, respecting gitignore rules.${NC}"
+            echo
+            echo -e "${BOLD}Usage:${NC}"
+            echo "  packup pack [options] <directory> [output_file]"
+            echo
+            echo -e "${BOLD}Options:${NC}"
+            echo -e "  ${YELLOW}-v${NC}              Verbose mode, show additional information"
+            echo -e "  ${YELLOW}-i${NC} ${ITALIC}pattern${NC}      Ignore files matching pattern (can be used multiple times)"
+            echo
+            echo -e "${BOLD}Arguments:${NC}"
+            echo -e "  ${ITALIC}directory${NC}       Source directory to pack"
+            echo -e "  ${ITALIC}output_file${NC}     Output file (default: packed_files.txt)"
+            echo
+            echo -e "${BOLD}Examples:${NC}"
+            echo "  packup pack src/"
+            echo "  packup pack -v project/ output.txt"
+            echo "  packup pack -i '*.log' -i 'temp/*' src/"
+            echo
+            echo -e "${BOLD}Pattern Examples:${NC}"
+            echo "  *.log           # Ignore all .log files"
+            echo "  test/           # Ignore 'test' directory"
+            echo "  temp/*          # Ignore contents of 'temp' directory"
+            echo "  *.{tmp,bak}     # Ignore .tmp and .bak files"
+            [ "$command" = "" ] && echo
+            ;;
+    esac
+    
+    case "$command" in
+        unpack|"")
+            [ "$command" = "" ] && echo -e "${BOLD}UNPACK COMMAND${NC}" || echo -e "${BOLD}UNPACK COMMAND${NC}"
+            echo -e "${DIM}Extract files from a packed file.${NC}"
+            echo
+            echo -e "${BOLD}Usage:${NC}"
+            echo "  packup unpack <input_file> [target_directory]"
+            echo
+            echo -e "${BOLD}Arguments:${NC}"
+            echo -e "  ${ITALIC}input_file${NC}      Packed file to extract"
+            echo -e "  ${ITALIC}target_directory${NC} Directory to extract to (default: current directory)"
+            echo
+            echo -e "${BOLD}Examples:${NC}"
+            echo "  packup unpack packed_files.txt"
+            echo "  packup unpack packed_files.txt output/"
+            [ "$command" = "" ] && echo
+            ;;
+    esac
+    
+    case "$command" in
+        "")
+            echo -e "${BOLD}FILE HANDLING${NC}"
+            echo -e "• Only text files are packed (detected automatically)"
+            echo -e "• Binary files are automatically excluded"
+            echo -e "• Files over 40,000 characters (~10,000 tokens) are skipped"
+            echo -e "• Git ignore rules are respected if available"
+            echo -e "• Hidden files (starting with .) are excluded"
+            echo
+            echo -e "${BOLD}ADDITIONAL NOTES${NC}"
+            echo -e "• Token count is estimated (4 characters per token)"
+            echo -e "• Directory structure is preserved when unpacking"
+            echo -e "• Custom ignore patterns support wildcards (* and ?)"
+            ;;
+    esac
+}
+
+# Unpack functionality
+do_unpack() {
+    local input_file="$1"
+    local target_dir="${2:-.}"
+
+    if [ ! -f "$input_file" ]; then
+        echo "Error: Input file not found"
+        exit 1
+    fi
+
+    mkdir -p "$target_dir"
+    
+    while IFS= read -r line; do
+        if [[ $line =~ ^BEGIN_FILE\;(.*)$ ]]; then
+            filepath="${BASH_REMATCH[1]}"
+            filepath="$target_dir/$filepath"
+            mkdir -p "$(dirname "$filepath")"
+            : > "$filepath"
+            reading_file=true
+        elif [[ $line == "END_FILE" ]]; then
+            reading_file=false
+            echo -e "${GREEN}✓${NC} Unpacked: $filepath"
+        elif [[ $reading_file == true ]]; then
+            echo "$line" >> "$filepath"
+        fi
+    done < "$input_file"
+
+    echo "Files have been unpacked to $target_dir"
+}
+
+# Pack functionality
+declare -A file_status
+declare -A file_reason
+
+mark_file() {
+    local filepath="$1"
+    local status="$2"
+    local reason="$3"
+    file_status["$filepath"]="$status"
+    file_reason["$filepath"]="$reason"
+}
+
+is_text_file() {
+    local filepath="$1"
+    if file "$filepath" | grep -qE "text|ASCII|UTF-8|JSON|XML|JavaScript|TypeScript|HTML|CSS|empty"; then
+        return 0
+    else
+        mark_file "$filepath" "excluded" "binary file"
+        return 1
+    fi
+}
+
+is_ignored() {
+    local filepath="$1"
+    local relative_path="${filepath#$source_dir/}"
+    
+    for pattern in "${ignore_patterns[@]}"; do
+        if [[ "$relative_path" == $pattern ]] || [[ "$relative_path" == *"/$pattern" ]]; then
+            if [ "$verbose" = true ]; then
+                echo "Ignoring $relative_path (matches pattern $pattern)"
+            fi
+            return 0
+        fi
+    done
+    return 1
+}
+
+process_file() {
+    local filepath="$1"
+    local relative_path="${filepath#$source_dir/}"
+    
+    if ! is_text_file "$filepath"; then
+        return
+    fi
+    
+    local char_count=$(wc -c < "$filepath")
+    
+    if [ "$char_count" -gt "$MAX_CHARS" ]; then
+        mark_file "$filepath" "excluded" "exceeds size limit"
+        return
+    fi
+    
+    echo "BEGIN_FILE;./$relative_path" >> "$output_file"
+    cat "$filepath" >> "$output_file"
+    echo "END_FILE" >> "$output_file"
+    
+    local token_count=$((char_count / 4))
+    mark_file "$filepath" "included" "$token_count tokens"
+}
+
+print_tree() {
+    local dir="$1"
+    local prefix="$2"
+    
+    local entries=($(ls -A "$dir"))
+    local last_idx=$((${#entries[@]} - 1))
+    
+    for idx in "${!entries[@]}"; do
+        local entry="${entries[$idx]}"
+        local path="$dir/$entry"
+        local is_last=$([[ $idx -eq $last_idx ]] && echo true || echo false)
+        
+        if [[ "$entry" == .* ]] || [[ "$entry" == "$(basename "$output_file")" ]]; then
+            continue
+        fi
+        
+        local branch=$($is_last && echo "$TREE_LAST" || echo "$TREE_BRANCH")
+        
+        if [ -d "$path" ]; then
+            echo -e "${prefix}${branch} ${BLUE}${entry}${NC}"
+            local new_prefix="$prefix$($is_last && echo "    " || echo "$TREE_VERT   ")"
+            print_tree "$path" "$new_prefix"
+        else
+            local status="${file_status[$path]}"
+            local reason="${file_reason[$path]}"
+            if [ "$status" == "included" ]; then
+                echo -e "${prefix}${branch} ${GREEN}${CHECK_MARK}${NC} ${entry} ${GRAY}(${reason})${NC}"
+            else
+                echo -e "${prefix}${branch} ${RED}${CROSS_MARK}${NC} ${entry} ${RED}(${reason})${NC}"
+            fi
+        fi
+    done
+}
+
+do_pack() {
+    local source_dir="$1"
+    local output_file="$2"
+    
+    : > "$output_file"
+    
+    use_git_ignore=false
+    if command -v git >/dev/null 2>&1; then
+        use_git_ignore=true
+        echo "Using git ignore rules"
+    fi
+
+    if [ "$verbose" = true ]; then
+        GIT_ERR=/dev/stderr
+    else
+        GIT_ERR=/dev/null
+    fi
+
+    if [ ${#ignore_patterns[@]} -gt 0 ] && [ "$verbose" = true ]; then
+        echo "Additional ignore patterns: ${ignore_patterns[*]}"
+    fi
+
+    find "$source_dir" -type f -not -name "$(basename "$output_file")" -not -path '*/\.*' | while read -r file; do
+        # First check custom ignore patterns
+        if is_ignored "$file"; then
+            mark_file "$file" "excluded" "matches ignore pattern"
+            continue
+        fi
+        
+        # Then check git ignore if enabled
+        if [ "$use_git_ignore" = true ]; then
+            if ! git check-ignore -q "$file" 2>"$GIT_ERR"; then
+                process_file "$file"
+            else
+                mark_file "$file" "excluded" "git ignored"
+            fi
+        else
+            process_file "$file"
+        fi
+    done
+
+    echo -e "\nFile system structure:"
+    print_tree "$source_dir" ""
+    echo -e "\nFiles have been packed into $output_file!"
+}
+
+# Main command processing
+case "$1" in
+    help|-h|--help)
+        shift
+        show_help "$1"
+        exit 0
+        ;;
+    pack)
+        while getopts "vi:h" opt; do
+            case $opt in
+                v) verbose=true ;;
+                i) ignore_patterns+=("$OPTARG") ;;
+                h) show_help "pack"; exit 0 ;;
+                *) usage ;;
+            esac
+        done
+        shift $((OPTIND-1))
+        
+        if [ -z "$1" ]; then
+            usage
+        fi
+        
+        source_dir="$1"
+        output_file="${2:-packed_files.txt}"
+        do_pack "$source_dir" "$output_file"
+        ;;
+    unpack)
+        # Handle -h flag for unpack command
+        if [ "$2" = "-h" ] || [ "$2" = "--help" ]; then
+            show_help "unpack"
+            exit 0
+        fi
+        
+        if [ -z "$2" ]; then
+            usage
+        fi
+        
+        input_file="$2"
+        target_dir="$3"
+        do_unpack "$input_file" "$target_dir"
+        ;;
+    "")
+        usage
+        ;;
+    *)
+        echo -e "${RED}Error:${NC} Unknown command '$1'"
+        echo
+        usage
+        ;;
+esac
